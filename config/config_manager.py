@@ -1,5 +1,6 @@
 # config/config_manager.py
 
+import os
 import yaml
 import logging
 from pathlib import Path
@@ -97,21 +98,19 @@ class ConfigManager:
     def get_secret(self, key: str, default: Any = None) -> Any:
         """
         Retrieves a secret value.
-        Prioritizes loaded Streamlit secrets (if available), otherwise looks in _secrets_data.
-        Note: For secrets loaded directly from .toml, keys will be flattened (e.g., 'openai_api_key').
+        Prioritizes loaded secrets from secrets.toml, then environment variables.
         """
-        # In a Streamlit environment, st.secrets is the primary source
-        try:
-            import streamlit as st
-            if hasattr(st, 'secrets') and key in st.secrets:
-                return st.secrets[key]
-        except ImportError:
-            pass # Not in a Streamlit environment
+        # Prioritize secrets.toml
+        secret = self._secrets_data.get(key.upper())
+        if secret:
+            return secret
 
-        if key in self._secrets_data:
-            return self._secrets_data[key]
-        
-        logger.warning(f"Secret '{key}' not found in loaded secrets or st.secrets. Returning default.")
+        # Fallback to environment variables
+        secret = os.environ.get(key.upper())
+        if secret:
+            return secret
+
+        logger.warning(f"Secret '{key}' not found in secrets.toml or environment variables. Returning default.")
         return default
 
     def set_secret(self, key: str, value: Any):
@@ -158,7 +157,7 @@ if __name__ == "__main__":
         os.remove(".streamlit/secrets.toml")
     if Path(".streamlit").exists():
         shutil.rmtree(".streamlit")
-    
+
     # Create dummy config files for testing
     Path("data").mkdir(exist_ok=True)
     Path(".streamlit").mkdir(exist_ok=True)
@@ -227,11 +226,11 @@ historical_weather:
 
     # Dummy secrets.toml content
     dummy_secrets_toml_content = """
-alphavantage_api_key = "test_alphavantage_key"
-coingecko_api_key = "test_coingecko_key"
-weather_api_key = "test_weather_key"
-gemini_api_key = "test_gemini_key"
-openai_api_key = "test_openai_key"
+ALPHAVANTAGE_API_KEY = "test_alphavantage_key"
+COINGECKO_API_KEY = "test_coingecko_key"
+WEATHER_API_KEY = "test_weather_key"
+GEMINI_API_KEY = "test_gemini_key"
+OPENAI_API_KEY = "test_openai_key"
 """
     with open(".streamlit/secrets.toml", "w") as f:
         f.write(dummy_secrets_toml_content)

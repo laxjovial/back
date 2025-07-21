@@ -27,36 +27,36 @@ from backend.models.user_models import UserProfile
 from backend.services.api_usage_service import ApiUsageService
 
 # Import all shared tools (these will be wrapped as Langchain Tools)
-from shared_tools.python_interpreter_tool import python_interpreter_with_rbac
-from shared_tools.scrapper_tool import scrape_web
+from shared_tools import (
+    AITool,
+    ScraperTool,
+    ChartTools,
+    DocSummarizer,
+    ExportUtils,
+    HistoricalDataTool,
+    ImportUtils,
+    LLMPipeline,
+    PythonInterpreterTool,
+    QueryUploadedDocsTool,
+    SentimentAnalysisTool,
+)
 
-from shared_tools.doc_summarizer import summarize_document # This is a direct function
-
-from shared_tools.doc_summarizer import summarize_document
-
-from shared_tools.chart_generation_tool import ChartTools # Import the class
-from shared_tools.sentiment_analysis_tool import analyze_sentiment
-from shared_tools.query_uploaded_docs_tool import query_uploaded_docs # This is a direct function
-
-# Import the export function from its utility module
-from shared_tools.export_utils import export_dataframe_to_file
-
-
-# Import domain-specific tools (import the classes, not individual functions)
 
 # Import domain-specific tools
 
-from domain_tools.finance_tools.finance_tool import FinanceTools
-from domain_tools.crypto_tools.crypto_tool import CryptoTools
-from domain_tools.medical_tools.medical_tool import MedicalTools
-from domain_tools.news_tools.news_tool import NewsTools
-from domain_tools.legal_tools.legal_tool import LegalTools
-from domain_tools.education_tools.education_tool import EducationTools
-from domain_tools.entertainment_tools.entertainment_tool import EntertainmentTools
-from domain_tools.weather_tools import WeatherTools
-from domain_tools.travel_tools import TravelTools
-from domain_tools.sports_tools import SportsTools
-from domain_tools.document_tools import DocumentTools # Import the DocumentTools class
+from domain_tools import (
+    CryptoTools,
+    DocumentTools,
+    EducationTools,
+    EntertainmentTools,
+    FinanceTools,
+    LegalTools,
+    MedicalTools,
+    NewsTools,
+    SportsTools,
+    TravelTools,
+    WeatherTools,
+)
 
 # Import the new dependency functions from backend.dependencies
 from backend.dependencies import (
@@ -70,10 +70,6 @@ from backend.dependencies import (
 # Import log_event directly from utils.analytics_tracker
 from utils.analytics_tracker import log_event
 
-from domain_tools.weather_tools.weather_tool import get_current_weather, get_weather_forecast
-from domain_tools.travel_tools import TravelTools
-from domain_tools.sports_tools import SportsTools
-
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -83,8 +79,8 @@ class LLMService:
     Manages interactions with Large Language Models and orchestrates tool usage.
     This service will be called by FastAPI endpoints.
     """
-    def __init__(self, 
-                 user_manager: UserManager, 
+    def __init__(self,
+                 user_manager: UserManager,
                  api_usage_service: ApiUsageService,
                  firestore_manager: Any, # Use Any for now if the exact class type causes Pydantic issues
                  cloud_storage_utils: Any, # Use Any for now
@@ -104,21 +100,31 @@ class LLMService:
         self.vector_utils_wrapper = vector_utils_wrapper
 
         # Instantiate shared tool classes
-        self.chart_tools_instance = ChartTools()
-        self.export_dataframe_to_file_func = export_dataframe_to_file # Direct function reference
+        self.ai_tool = AITool()
+        self.scraper_tool = ScraperTool(config_manager, user_manager)
+        self.chart_tools = ChartTools()
+        self.doc_summarizer = DocSummarizer(self.llm)
+        self.export_utils = ExportUtils()
+        self.historical_data_tool = HistoricalDataTool()
+        self.import_utils = ImportUtils()
+        self.llm_pipeline = LLMPipeline(self.llm)
+        self.python_interpreter_tool = PythonInterpreterTool(self.chart_tools, self.export_utils.export_dataframe_to_file)
+        self.query_uploaded_docs_tool = QueryUploadedDocsTool()
+        self.sentiment_analysis_tool = SentimentAnalysisTool()
+
 
         # Instantiate domain-specific tool classes
-        self.finance_tools = FinanceTools()
-        self.crypto_tools = CryptoTools()
-        self.medical_tools = MedicalTools()
-        self.news_tools = NewsTools()
-        self.legal_tools = LegalTools()
-        self.education_tools = EducationTools()
-        self.entertainment_tools = EntertainmentTools()
+        self.finance_tools = FinanceTools(config_manager, firestore_manager, log_event, self.document_tools)
+        self.crypto_tools = CryptoTools(config_manager, firestore_manager, log_event, self.document_tools)
+        self.medical_tools = MedicalTools(config_manager, log_event, self.document_tools)
+        self.news_tools = NewsTools(config_manager, log_event, self.document_tools)
+        self.legal_tools = LegalTools(config_manager, log_event, self.document_tools)
+        self.education_tools = EducationTools(config_manager, log_event, self.document_tools)
+        self.entertainment_tools = EntertainmentTools(config_manager, log_event, self.document_tools)
         self.weather_tools = WeatherTools()
         self.travel_tools = TravelTools()
         self.sports_tools = SportsTools()
-        
+
         # Instantiate DocumentTools with its specific dependencies
         self.document_tools = DocumentTools(
             vector_utils_wrapper=self.vector_utils_wrapper,
@@ -130,7 +136,7 @@ class LLMService:
 
         logger.info("LLMService initialized with UserManager, ApiUsageService, ChartTools, ExportUtil, and all domain tools.")
 
-    def _load_llm(self, user_profile: UserProfile, 
+    def _load_llm(self, user_profile: UserProfile,
                   user_provided_temperature: Optional[float] = None,
                   user_provided_llm_provider: Optional[str] = None,
                   user_provided_model_name: Optional[str] = None):
@@ -139,7 +145,7 @@ class LLMService:
         and user-provided selections for temperature, provider, and model name.
         """
         user_id = user_profile.user_id
-        
+
         # Determine effective temperature based on RBAC
         can_control_temp = self.user_manager.get_user_tier_capability(user_profile.tier, 'llm_temperature_control_enabled', False)
         tier_default_temp = self.user_manager.get_user_tier_capability(user_profile.tier, 'llm_default_temperature', config_manager.get('llm.temperature', 0.7))
@@ -154,7 +160,7 @@ class LLMService:
 
         # Determine effective LLM provider and model name based on RBAC
         can_select_model = self.user_manager.get_user_tier_capability(user_profile.tier, 'llm_model_selection_enabled', False)
-        
+
         effective_llm_provider = config_manager.get("llm.provider", "openai")
         effective_model_name = config_manager.get("llm.model_name", "gpt-3.5-turbo")
 
@@ -174,23 +180,23 @@ class LLMService:
             if not api_key:
                 logger.error("OpenAI API key not found in secrets.")
                 raise ValueError("OpenAI API key is required for OpenAI LLM provider.")
-            
+
             return ChatOpenAI(model_name=effective_model_name, temperature=effective_temperature, api_key=api_key)
-            
+
         elif effective_llm_provider == "google":
             api_key = config_manager.get_secret("google_api_key")
             if not api_key:
                 logger.error("Google API key not found in secrets.")
                 raise ValueError("Google API key is required for Google LLM provider.")
-            
+
             # Use ChatGoogleGenerativeAI as imported
             return ChatGoogleGenerativeAI(model=effective_model_name, temperature=effective_temperature, api_key=api_key)
-            
+
         elif effective_llm_provider == "ollama":
             ollama_base_url = config_manager.get("ollama.base_url", "http://localhost:11434")
             logger.info(f"Connecting to Ollama at: {ollama_base_url}")
             return ChatOllama(model=effective_model_name, temperature=effective_temperature, base_url=ollama_base_url)
-            
+
         else:
             raise ValueError(f"Unsupported LLM provider: {effective_llm_provider}")
 
@@ -206,16 +212,16 @@ class LLMService:
                                       user_provided_temperature=temperature,
                                       user_provided_llm_provider=llm_provider,
                                       user_provided_model_name=model_name)
-            
+
             langchain_messages = [self._convert_to_langchain_message(msg) for msg in messages]
             response = temp_llm.invoke(langchain_messages)
-            
+
             return response.content
         except Exception as e:
             logger.error(f"Error during LLM chat completion for user {user_profile.user_id}: {e}", exc_info=True)
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"LLM chat completion failed: {e}")
 
-    async def chat_with_agent(self, prompt: str, chat_history: List[Dict[str, str]], user_profile: UserProfile, 
+    async def chat_with_agent(self, prompt: str, chat_history: List[Dict[str, str]], user_profile: UserProfile,
                               user_provided_temperature: Optional[float] = None,
                               user_provided_llm_provider: Optional[str] = None,
                               user_provided_model_name: Optional[str] = None) -> str:
@@ -244,20 +250,20 @@ class LLMService:
                 if isinstance(instance, SportsTools): return "sports-api-default"
                 if isinstance(instance, DocumentTools): return "document-api"
                 if isinstance(instance, ChartTools): return "chart-gen-api"
-            
+
             # Fallback for directly imported functions or special cases
-            if tool_func == python_interpreter_with_rbac:
+            if tool_func == self.python_interpreter_tool.python_interpreter_with_rbac:
                 return "python-interpreter-api"
-            if tool_func == scrape_web:
+            if tool_func == self.scraper_tool.scrape_web:
                 return "web-scraper-api"
-            if tool_func == analyze_sentiment:
+            if tool_func == self.sentiment_analysis_tool.analyze_sentiment:
                 return "sentiment-api"
-            
+
             return "general-tool-api"
 
         async def wrapped_tool_executor(tool_func, *args, **kwargs):
             api_id = get_tool_api_id(tool_func)
-            
+
             can_proceed = await self.api_usage_service.check_api_limit(user_profile, api_id)
             if not can_proceed:
                 logger.warning(f"API limit exceeded for user {user_id}, API {api_id}.")
@@ -268,7 +274,7 @@ class LLMService:
                         "code": "API_LIMIT_EXCEEDED"
                     }
                 )
-            
+
             # Pass user_token to tools that need it for internal RBAC/logging
             tool_args = kwargs.copy()
             if 'user_token' not in tool_args and hasattr(user_profile, 'user_id'):
@@ -278,15 +284,15 @@ class LLMService:
 
             # Special handling for python_interpreter_with_rbac and generate_and_save_chart
             # to pass their specific dependencies
-            if tool_func == python_interpreter_with_rbac:
-                tool_args['chart_tools'] = self.chart_tools_instance
-                tool_args['export_dataframe_to_file_func'] = self.export_dataframe_to_file_func
-            
+            if tool_func == self.python_interpreter_tool.python_interpreter_with_rbac:
+                tool_args['chart_tools'] = self.chart_tools
+                tool_args['export_dataframe_to_file_func'] = self.export_utils.export_dataframe_to_file
+
             logger.debug(f"Executing tool {tool_func.__name__} for user {user_id} (API: {api_id})...")
-            
+
             # Correctly unpack args and kwargs for the tool_func call
             tool_output = await tool_func(*args, **tool_args)
-            
+
             await self.api_usage_service.increment_api_usage(user_id, api_id)
             logger.debug(f"Tool {tool_func.__name__} executed successfully. Usage incremented.")
             return tool_output
@@ -297,28 +303,28 @@ class LLMService:
         if self.user_manager.get_user_tier_capability(user_profile.tier, 'web_search_enabled', False):
             available_tools.append(Tool(
                 name="scrape_web",
-                func=lambda query: wrapped_tool_executor(scrape_web, query),
+                func=lambda query: wrapped_tool_executor(self.scraper_tool.scrape_web, query),
                 description="A tool to perform web searches and scrape content from URLs. Input should be a search query string."
             ))
             logger.debug(f"Tool 'scrape_web' added for user {user_id}")
-        
+
         if self.user_manager.get_user_tier_capability(user_profile.tier, 'data_analysis_enabled', False):
             available_tools.append(Tool(
                 name="python_interpreter_with_rbac",
                 func=lambda code: wrapped_tool_executor(
-                    python_interpreter_with_rbac,
+                    self.python_interpreter_tool.python_interpreter_with_rbac,
                     code,
                     # chart_tools and export_dataframe_to_file_func are passed within wrapped_tool_executor
                 ),
                 description="A powerful Python interpreter for data analysis, complex calculations, time series analysis, regression analysis, or any machine learning tasks. Input should be valid Python code. This tool also provides access to `chart_tools` for charting and `export_data_to_file` for exporting dataframes."
             ))
             logger.debug(f"Tool 'python_interpreter_with_rbac' added for user {user_id}")
-        
+
         if self.user_manager.get_user_tier_capability(user_profile.tier, 'chart_generation_enabled', False):
             available_tools.append(Tool(
                 name="generate_and_save_chart",
                 func=lambda data_json, chart_type, x_column=None, y_column=None, color_column=None, title="Generated Chart", x_label=None, y_label=None, library="matplotlib", export_format="png": wrapped_tool_executor(
-                    self.chart_tools_instance.generate_and_save_chart,
+                    self.chart_tools.generate_and_save_chart,
                     data_json=data_json,
                     chart_type=chart_type,
                     x_column=x_column,
@@ -337,11 +343,11 @@ class LLMService:
         if self.user_manager.get_user_tier_capability(user_profile.tier, 'sentiment_analysis_enabled', False):
             available_tools.append(Tool(
                 name="analyze_sentiment",
-                func=lambda text: wrapped_tool_executor(analyze_sentiment, text),
+                func=lambda text: wrapped_tool_executor(self.sentiment_analysis_tool.analyze_sentiment, text),
                 description="Analyzes the sentiment of a given text. Input should be a string of text."
             ))
             logger.debug(f"Tool 'analyze_sentiment' added for user {user_id}")
-        
+
         # Document Tools
         if self.user_manager.get_user_tier_capability(user_profile.tier, 'document_upload_enabled', False):
             available_tools.append(Tool(
@@ -379,16 +385,16 @@ class LLMService:
         # Domain-specific Tools - Finance Tools
         if self.user_manager.get_user_tier_capability(user_profile.tier, 'finance_tool_access', False):
             available_tools.extend([
-                Tool(name="get_stock_price", func=lambda symbol: wrapped_tool_executor(self.finance_tools.get_stock_price, symbol), description="Retrieves the current stock price for a given stock symbol. Input should be a stock symbol (e.g., 'AAPL')."),
+                Tool(name="get_stock_price", func=lambda symbol: wrapped_tool_executor(self.finance_tools.finance_get_stock_price, symbol), description="Retrieves the current stock price for a given stock symbol. Input should be a stock symbol (e.g., 'AAPL')."),
                 Tool(name="get_company_news", func=lambda symbol, from_date, to_date: wrapped_tool_executor(self.finance_tools.get_company_news, symbol, from_date, to_date), description="Fetches recent news for a company by its stock symbol within a date range. Input: symbol (str), from_date (YYYY-MM-DD), to_date (YYYY-MM-DD)."),
                 Tool(name="lookup_stock_symbol", func=lambda company_name: wrapped_tool_executor(self.finance_tools.lookup_stock_symbol, company_name), description="Looks up the stock symbol for a given company name. Input: company_name (str).")
             ])
             logger.debug(f"Finance tools (current price, company news, symbol lookup) added for user {user_id}")
-        
+
         if self.user_manager.get_user_tier_capability(user_profile.tier, 'historical_data_access', False):
             available_tools.append(Tool(
                 name="get_historical_stock_prices",
-                func=lambda symbol, start_date, end_date: wrapped_tool_executor(self.finance_tools.get_historical_stock_prices, symbol, start_date, end_date),
+                func=lambda symbol, start_date, end_date: wrapped_tool_executor(self.finance_tools.finance_get_historical_stock_prices, symbol, start_date, end_date),
                 description="Retrieves historical stock prices for a given symbol and date range. Input: symbol (str), start_date (YYYY-MM-DD), end_date (YYYY-MM-DD)."
             ))
             logger.debug(f"Tool 'get_historical_stock_prices' added for user {user_id}")
@@ -396,46 +402,46 @@ class LLMService:
         # Crypto Tools
         if self.user_manager.get_user_tier_capability(user_profile.tier, 'crypto_tool_access', False):
             available_tools.extend([
-                Tool(name="get_crypto_price", func=lambda coin_id: wrapped_tool_executor(self.crypto_tools.get_crypto_price, coin_id), description="Retrieves the current price of a cryptocurrency by its ID."),
-                Tool(name="get_historical_crypto_prices", func=lambda coin_id, vs_currency, days: wrapped_tool_executor(self.crypto_tools.get_historical_crypto_prices, coin_id, vs_currency, days), description="Retrieves historical prices for a cryptocurrency."),
-                Tool(name="get_crypto_id_by_symbol", func=lambda symbol: wrapped_tool_executor(self.crypto_tools.get_crypto_id_by_symbol, symbol), description="Looks up the cryptocurrency ID by its symbol.")
+                Tool(name="get_crypto_price", func=lambda coin_id: wrapped_tool_executor(self.crypto_tools.crypto_get_crypto_price, coin_id), description="Retrieves the current price of a cryptocurrency by its ID."),
+                Tool(name="get_historical_crypto_prices", func=lambda coin_id, vs_currency, days: wrapped_tool_executor(self.crypto_tools.crypto_get_historical_crypto_price, coin_id, vs_currency, days), description="Retrieves historical prices for a cryptocurrency."),
+                Tool(name="get_crypto_id_by_symbol", func=lambda symbol: wrapped_tool_executor(self.crypto_tools.crypto_get_crypto_id_by_symbol, symbol), description="Looks up the cryptocurrency ID by its symbol.")
             ])
             logger.debug(f"Crypto tools added for user {user_id}")
 
         # Medical Tools
         if self.user_manager.get_user_tier_capability(user_profile.tier, 'medical_tool_access', False):
             available_tools.extend([
-                Tool(name="get_drug_info", func=lambda drug_name: wrapped_tool_executor(self.medical_tools.get_drug_info, drug_name), description="Retrieves information about a specific drug."),
-                Tool(name="get_symptom_info", func=lambda symptom_name: wrapped_tool_executor(self.medical_tools.get_symptom_info, symptom_name), description="Retrieves information about a specific symptom.")
+                Tool(name="get_drug_info", func=lambda drug_name: wrapped_tool_executor(self.medical_tools.medical_get_drug_info, drug_name), description="Retrieves information about a specific drug."),
+                Tool(name="get_symptom_info", func=lambda symptom_name: wrapped_tool_executor(self.medical_tools.medical_check_symptoms, symptom_name), description="Retrieves information about a specific symptom.")
             ])
             logger.debug(f"Medical tools added for user {user_id}")
 
         # News Tools
         if self.user_manager.get_user_tier_capability(user_profile.tier, 'news_tool_access', False):
-            available_tools.append(Tool(name="get_general_news", func=lambda query: wrapped_tool_executor(self.news_tools.get_general_news, query), description="Fetches general news articles based on a query."))
+            available_tools.append(Tool(name="get_general_news", func=lambda query: wrapped_tool_executor(self.news_tools.news_search_news, query), description="Fetches general news articles based on a query."))
             logger.debug(f"General news tool added for user {user_id}")
-        
+
         # Legal Tools
         if self.user_manager.get_user_tier_capability(user_profile.tier, 'legal_tool_access', False):
             available_tools.extend([
-                Tool(name="get_legal_definition", func=lambda term: wrapped_tool_executor(self.legal_tools.get_legal_definition, term), description="Retrieves the definition of a legal term."),
-                Tool(name="get_case_summary", func=lambda case_name: wrapped_tool_executor(self.legal_tools.get_case_summary, case_name), description="Retrieves a summary of a legal case.")
+                Tool(name="get_legal_definition", func=lambda term: wrapped_tool_executor(self.legal_tools.legal_perform_legal_research, term), description="Retrieves the definition of a legal term."),
+                Tool(name="get_case_summary", func=lambda case_name: wrapped_tool_executor(self.legal_tools.legal_perform_legal_research, case_name), description="Retrieves a summary of a legal case.")
             ])
             logger.debug(f"Legal tools (definition, case summary) added for user {user_id}")
-        
+
         # Education Tools
         if self.user_manager.get_user_tier_capability(user_profile.tier, 'education_tool_access', False):
             available_tools.extend([
-                Tool(name="get_academic_definition", func=lambda term: wrapped_tool_executor(self.education_tools.get_academic_definition, term), description="Retrieves the definition of an academic term."),
-                Tool(name="get_historical_event_summary", func=lambda event_name: wrapped_tool_executor(self.education_tools.get_historical_event_summary, event_name), description="Retrieves a summary of a historical event.")
+                Tool(name="get_academic_definition", func=lambda term: wrapped_tool_executor(self.education_tools.education_search_educational_resources, term), description="Retrieves the definition of an academic term."),
+                Tool(name="get_historical_event_summary", func=lambda event_name: wrapped_tool_executor(self.education_tools.education_search_educational_resources, event_name), description="Retrieves a summary of a historical event.")
             ])
             logger.debug(f"Education tools (academic definition, historical event summary) added for user {user_id}")
-        
+
         # Entertainment Tools
         if self.user_manager.get_user_tier_capability(user_profile.tier, 'entertainment_tool_access', False):
             available_tools.extend([
-                Tool(name="get_movie_details", func=lambda movie_title: wrapped_tool_executor(self.entertainment_tools.get_movie_details, movie_title), description="Retrieves details about a movie."),
-                Tool(name="get_music_artist_info", func=lambda artist_name: wrapped_tool_executor(self.entertainment_tools.get_music_artist_info, artist_name), description="Retrieves information about a music artist.")
+                Tool(name="get_movie_details", func=lambda movie_title: wrapped_tool_executor(self.entertainment_tools.entertainment_search_movies, movie_title), description="Retrieves details about a movie."),
+                Tool(name="get_music_artist_info", func=lambda artist_name: wrapped_tool_executor(self.entertainment_tools.entertainment_search_music_track, artist_name), description="Retrieves information about a music artist.")
             ])
             logger.debug(f"Entertainment tools (movie details, music artist info) added for user {user_id}")
 
@@ -447,7 +453,7 @@ class LLMService:
                 Tool(name="get_air_quality", func=lambda location: wrapped_tool_executor(self.weather_tools.get_air_quality, location), description="Retrieves air quality information for a specified location. Input: location (str).")
             ])
             logger.debug(f"Weather tools (current weather, forecast, air quality) added for user {user_id}")
-        
+
         # Travel Tools
         if self.user_manager.get_user_tier_capability(user_profile.tier, 'travel_tool_access', False):
             available_tools.extend([
@@ -456,7 +462,7 @@ class LLMService:
                 Tool(name="get_destination_info", func=lambda destination_name: wrapped_tool_executor(self.travel_tools.get_destination_info, destination_name), description="Retrieves general information about a travel destination, including description, best time to visit, currency, and language.")
             ])
             logger.debug(f"Travel tools (search flights, search hotels, get destination info) added for user {user_id}")
-        
+
         # Sports Tools
         if self.user_manager.get_user_tier_capability(user_profile.tier, 'sports_tool_access', False):
             available_tools.extend([
@@ -539,7 +545,7 @@ class LLMService:
         agent = create_react_agent(self.llm, available_tools, prompt_template)
         # AgentExecutor will handle parsing errors and verbose logging
         agent_executor = AgentExecutor(agent=agent, tools=available_tools, verbose=True, handle_parsing_errors=True)
-        
+
         logger.info("Using real Langchain AgentExecutor.")
 
         try:
@@ -555,6 +561,32 @@ class LLMService:
         except Exception as e:
             logger.error(f"Error during Langchain agent invocation for user {user_id}: {e}", exc_info=True)
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Agent execution failed: {str(e)}")
+
+    async def run_tool_by_name(self, tool_name: str, tool_args: Dict[str, Any], user_profile: UserProfile) -> Any:
+        """
+        Dynamically runs a tool by its name with the given arguments.
+        """
+        # A mapping of tool names to their corresponding methods
+        tool_mapping = {
+            "get_stock_price": self.finance_tools.finance_get_stock_price,
+            "get_historical_stock_prices": self.finance_tools.finance_get_historical_stock_prices,
+            "get_company_overview": self.finance_tools.finance_get_company_overview,
+            "get_forex_exchange_rate": self.finance_tools.finance_get_forex_exchange_rate,
+            "scrape_web": self.scraper_tool.scrape_web,
+            # ... add other tools here
+        }
+
+        tool_method = tool_mapping.get(tool_name)
+        if not tool_method:
+            raise ValueError(f"Tool '{tool_name}' not found.")
+
+        # Check for user permission to use the tool (a simplified example)
+        # In a real app, this would be more sophisticated
+        if "finance" in tool_name and not self.user_manager.get_user_tier_capability(user_profile.tier, 'finance_tool_access', False):
+            raise PermissionError(f"User does not have access to the tool '{tool_name}'.")
+
+        # Run the tool
+        return await tool_method(**tool_args, user_context=user_profile)
 
     def _convert_to_langchain_message(self, message: Dict[str, str]) -> BaseMessage:
         """Helper to convert dictionary messages to Langchain BaseMessage objects."""
