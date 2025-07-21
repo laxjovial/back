@@ -25,7 +25,7 @@ const AIAssistant = ({ auth }) => {
 
         try {
             const idToken = await auth.currentUser.getIdToken(true);
-            const response = await fetch('/tools/chat/agent', {
+            const response = await fetch('/chat/agent', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',

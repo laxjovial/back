@@ -45,12 +45,15 @@ async def root():
     return {"message": "AI Assistant Backend is running!"}
 
 # You might want to add an event listener for startup if any global setup is needed
+import webbrowser
+
 @app.on_event("startup")
 async def startup_event():
     logger.info("Application startup...")
     # Any other startup logic, e.g., database connections, initial data loading
     # if config_manager needs explicit initialization, do it here if not already done by import
     # Example: if config_manager had a static init method: ConfigManager.initialize_global_config()
+    webbrowser.open_new_tab("http://127.0.0.1:8000/docs")
 
 @app.on_event("shutdown")
 async def shutdown_event():
