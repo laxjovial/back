@@ -1,2 +1,3 @@
 # Secrets
 config/secrets.toml
+.streamlit/secrets.toml
